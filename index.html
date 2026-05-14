@@ -1375,19 +1375,30 @@ function tick(now) {
     if (state.time >= effD) {
       if (state.looping) {
         state.time = 0;
+        // Loop: snap video back to 0
+        if (state.mediaType === 'video' && state.media) {
+          try { state.media.currentTime = 0; } catch (e) {}
+        }
       } else {
         state.time = effD;
         state.playing = false;
         updatePlayButton();
+        // Pause the source video too
+        if (state.mediaType === 'video' && state.media) {
+          try { state.media.pause(); } catch (e) {}
+        }
       }
     }
-    // Drive the video by currentTime so it always matches the timeline,
-    // independent of autoplay permissions or drift.
+    // For the preview, let the video play naturally — hardware-accelerated
+    // decode runs in the background and drawImage() snapshots the current
+    // frame. This avoids the per-frame seek that was causing judder.
+    // Only correct course if drift exceeds 150ms (e.g. tab was throttled).
     if (state.mediaType === 'video' && state.media && state.media.duration) {
+      if (state.media.paused) {
+        state.media.play().catch(() => {});
+      }
       const videoT = state.time % state.media.duration;
-      // Only assign if the gap is meaningful — assigning every frame causes
-      // visible jitter on some browsers.
-      if (Math.abs(state.media.currentTime - videoT) > 0.05) {
+      if (Math.abs(state.media.currentTime - videoT) > 0.15) {
         try { state.media.currentTime = videoT; } catch (e) {}
       }
     }
@@ -1395,6 +1406,10 @@ function tick(now) {
     render();
   } else {
     lastFrameTime = 0;
+    // Pause source video when timeline is paused so it doesn't keep advancing
+    if (state.mediaType === 'video' && state.media && !state.media.paused) {
+      try { state.media.pause(); } catch (e) {}
+    }
   }
   requestAnimationFrame(tick);
 }
@@ -2228,75 +2243,93 @@ async function exportVideo(format) {
   }
 
   const { w: W, h: H } = getExportDimensions();
-  // Use an offscreen canvas at the chosen resolution
   const offCanvas = document.createElement('canvas');
   offCanvas.width = W;
   offCanvas.height = H;
   const offCtx = offCanvas.getContext('2d');
 
-  // Video formats always render with an opaque background (no alpha).
-  // PNG sequence handles alpha separately.
   const renderOpts = { forceOpaqueFill: true };
   const fps = 30;
-  const stream = offCanvas.captureStream(fps);
-  // Higher bitrate for higher resolutions
+  const effD = computePhases().effectiveDuration;
+  const totalFrames = Math.ceil(effD * fps);
+
+  // Use captureStream(0) — manual frame mode. The track only emits a frame
+  // when we explicitly call requestFrame(). This decouples render speed from
+  // recording cadence, giving deterministic frame timing regardless of how
+  // long each frame takes to draw.
+  const stream = offCanvas.captureStream(0);
+  const track = stream.getVideoTracks()[0];
   const bitrate = W >= 3840 ? 40_000_000 : W >= 1920 ? 16_000_000 : 8_000_000;
   const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: bitrate });
 
   const chunks = [];
   recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-  const done = new Promise(resolve => { recorder.onstop = () => resolve(); });
+  const recorderDone = new Promise(resolve => { recorder.onstop = () => resolve(); });
 
   showExportProgress(`Rendering ${ext.toUpperCase()}…`);
   setStatus(`Exporting ${ext.toUpperCase()}…`, true);
 
-  state.time = 0;
-  // Seek video to 0 and let it play in parallel — but also nudge it via
-  // currentTime each frame so it stays in sync with the timeline even if
-  // autoplay was blocked or playback drifts.
+  // Pause the source video — we'll seek it manually per frame
   if (state.mediaType === 'video' && state.media) {
-    try {
-      state.media.currentTime = 0;
-      // Don't await — let it start in the background. The currentTime
-      // nudges in tickExport keep it on track regardless.
-      state.media.play().catch(() => {});
-    } catch (err) { /* ignore */ }
+    try { state.media.pause(); } catch (e) {}
+  }
+
+  // Render the first frame BEFORE starting the recorder so it has something
+  // to capture immediately.
+  state.time = 0;
+  if (state.mediaType === 'video' && state.media && state.media.duration) {
+    await seekVideo(state.media, 0);
   }
   renderToContext(offCtx, W, H, renderOpts);
+
   recorder.start();
+  // Push the first frame
+  if (track.requestFrame) track.requestFrame();
 
+  // Render each subsequent frame deterministically.
+  // For each frame: set state.time, seek the source video if needed (and wait
+  // for the seek to complete), render to canvas, push to recorder.
+  // The pacing between requestFrame calls determines playback speed of the
+  // recorded video. We pace at exactly 1/fps seconds per frame.
+  const frameInterval = 1000 / fps;
   const startReal = performance.now();
-  const effD = computePhases().effectiveDuration;
-  let resolveLoop;
-  const loopDone = new Promise(r => { resolveLoop = r; });
+  let nextFrameDeadline = startReal + frameInterval;
 
-  const tickExport = () => {
-    const elapsed = (performance.now() - startReal) / 1000;
-    state.time = Math.min(elapsed, effD);
-    // Keep the source video synced to the timeline. If play() worked, this
-    // is mostly a no-op; if not, it drives the video frame-by-frame.
+  for (let i = 1; i < totalFrames; i++) {
+    const frameTime = i / fps;
+    state.time = Math.min(frameTime, effD);
+
+    // Sync source video for this frame
     if (state.mediaType === 'video' && state.media && state.media.duration) {
-      const videoT = Math.min(state.time, state.media.duration - 0.001);
-      if (Math.abs(state.media.currentTime - videoT) > 0.08) {
-        try { state.media.currentTime = videoT; } catch (e) {}
-      }
+      const videoT = Math.min(state.time, state.media.duration - 0.01);
+      await seekVideo(state.media, videoT);
     }
-    updateScrub();
-    renderToContext(offCtx, W, H, renderOpts);
-    render();
-    const pct = (elapsed / effD) * 100;
-    updateExportProgress(Math.min(95, pct));
-    if (elapsed < effD) {
-      requestAnimationFrame(tickExport);
-    } else {
-      updateExportProgress(95, 'Finalizing…');
-      setTimeout(() => { recorder.stop(); resolveLoop(); }, 150);
-    }
-  };
-  requestAnimationFrame(tickExport);
 
-  await loopDone;
-  await done;
+    renderToContext(offCtx, W, H, renderOpts);
+
+    // Wait until the next frame's wall-clock deadline before pushing it.
+    // This keeps the MediaRecorder's timestamp progression consistent with
+    // the framerate we want, regardless of how long the render itself took.
+    const now = performance.now();
+    if (now < nextFrameDeadline) {
+      await new Promise(r => setTimeout(r, nextFrameDeadline - now));
+    }
+    if (track.requestFrame) track.requestFrame();
+    nextFrameDeadline += frameInterval;
+
+    // Progress update + preview refresh
+    if (i % 3 === 0) {
+      updateScrub();
+      render();
+    }
+    updateExportProgress((i / totalFrames) * 95, `Frame ${i + 1} of ${totalFrames}`);
+  }
+
+  updateExportProgress(95, 'Finalizing…');
+  // Brief pause so the last frame is captured before stopping
+  await new Promise(r => setTimeout(r, 200));
+  recorder.stop();
+  await recorderDone;
 
   const blob = new Blob(chunks, { type: mimeType });
   const url = URL.createObjectURL(blob);
