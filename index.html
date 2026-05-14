@@ -1251,6 +1251,7 @@ function renderToContext(targetCtx, W, H, opts = {}) {
   const PHASES = computePhases();
   const t = state.time / PHASES.effectiveDuration;
   let opacity = 1;
+  let shadowOpacity = 1;
   let offsetX = 0;
   let offsetY = 0;
 
@@ -1271,6 +1272,12 @@ function renderToContext(targetCtx, W, H, opts = {}) {
     const s = easeScaleIn(phaseProgress(t, PHASES.scaleIn));
     maskW = customW * s;
     maskH = customH * s;
+    // Fade-in: media fades over 5 frames; shadow waits 8 frames, then fades
+    // smoothly over 8 frames with an easeInOut so it doesn't pop in.
+    const frameSec = 1 / 30;
+    opacity = Math.min(1, state.time / (5 * frameSec));
+    const shadowRaw = Math.max(0, Math.min(1, (state.time - 8 * frameSec) / (8 * frameSec)));
+    shadowOpacity = easeInOut(shadowRaw);
   } else if (t < PHASES.holdAtCustom.end) {
     // 2. Hold at custom size
     maskW = customW;
@@ -1346,7 +1353,10 @@ function renderToContext(targetCtx, W, H, opts = {}) {
     targetCtx.shadowBlur = (8 + softness * 100) * sizeFactor;
     targetCtx.shadowOffsetY = (6 + intensity * 30) * sizeFactor;
     targetCtx.fillStyle = 'rgba(0,0,0,1)';
-    targetCtx.globalAlpha = opacity;
+    // Use the dedicated shadow opacity — during scale-in it lags the media
+    // by a few frames so the media doesn't appear darkened. Outside scale-in
+    // it tracks the main opacity (set equal up in the phase logic).
+    targetCtx.globalAlpha = shadowOpacity;
     roundedRect(targetCtx, maskX, maskY, maskW, maskH, effectiveRadius);
     targetCtx.fill();
     targetCtx.restore();
