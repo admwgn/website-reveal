@@ -532,19 +532,31 @@
     background: white;
     border: 1px solid var(--border);
     color: var(--text-dim);
-    padding: 3px 9px;
-    border-radius: 999px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border-radius: 6px;
     cursor: pointer;
-    font-family: inherit;
-    font-size: 10px;
-    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     transition: all 0.15s;
   }
+  .lock-toggle:hover { border-color: var(--text-faint); }
   .lock-toggle.active {
     color: var(--accent);
     border-color: var(--accent);
     background: var(--accent-soft);
   }
+  .lock-toggle svg {
+    width: 14px;
+    height: 14px;
+  }
+  /* Hide one icon based on locked state */
+  .lock-toggle .icon-locked { display: none; }
+  .lock-toggle .icon-unlocked { display: block; }
+  .lock-toggle.active .icon-locked { display: block; }
+  .lock-toggle.active .icon-unlocked { display: none; }
 
   .presets {
     display: grid;
@@ -703,15 +715,7 @@
         <div class="field">
           <div class="field-row"><span class="field-label">Name</span></div>
           <input type="text" id="projectName" placeholder="e.g. partner-q4-campaign" value="">
-          <p class="field-help" style="margin-top: 8px; margin-bottom: 0;">Appears in export filenames. Letters, numbers, and dashes only.</p>
-        </div>
-
-        <div class="btn-row">
-          <button class="btn btn-secondary" id="saveProjectBtn">↓ Save (.json)</button>
-          <label class="file-label">
-            <span class="btn btn-secondary">↑ Load (.json)</span>
-            <input type="file" class="file-input" id="loadProjectInput" accept="application/json,.json">
-          </label>
+          <p class="field-help" style="margin-top: 8px; margin-bottom: 0;">Appears in export filenames. Settings auto-save every 5 minutes.</p>
         </div>
       </div>
     </div>
@@ -722,13 +726,16 @@
         <svg class="caret" viewBox="0 0 10 10" fill="none"><path d="M2 4 L5 7 L8 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </div>
       <div class="section-body">
-        <p class="field-help">Upload a screenshot or a video. Videos play inside the mask; the scroll animation is skipped.</p>
+        <p class="field-help">Upload a screenshot or a video. Max 50MB. Videos play inside the mask without scrolling.</p>
 
         <div class="field">
           <label class="file-label">
             <span class="btn" id="uploadBtn">Upload image or video</span>
             <input type="file" class="file-input" id="fileInput" accept="image/*,video/*">
           </label>
+          <p class="field-help" style="margin-top: 8px; margin-bottom: 0; font-size: 10px;">
+            <strong style="color: var(--text);">Videos:</strong> H.264 MP4 at 1080p works everywhere. 4K MP4s may fail — re-export at 1080p if so.
+          </p>
         </div>
 
         <div class="field" id="mediaInfo" style="display: none;">
@@ -749,7 +756,18 @@
         <div class="field">
           <div class="field-row">
             <span class="field-label">Size</span>
-            <button class="lock-toggle" id="lockBtn">Free</button>
+            <button class="lock-toggle" id="lockBtn" type="button" title="Lock width and height together">
+              <svg class="icon-locked" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 7V5a4 4 0 0 1 8 0v2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+                <circle cx="8" cy="10.5" r="1" fill="currentColor"/>
+              </svg>
+              <svg class="icon-unlocked" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 7V5a4 4 0 0 1 7.5-2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" stroke-width="1.4"/>
+                <circle cx="8" cy="10.5" r="1" fill="currentColor"/>
+              </svg>
+            </button>
           </div>
           <div class="slider-field">
             <div class="slider-field-head">
@@ -1305,10 +1323,9 @@ function renderToContext(targetCtx, W, H, opts = {}) {
     }
   }
 
+  // Videos and images both anchor to the top of the mask.
+  // Videos don't scroll, so mediaY just sits at maskY.
   let mediaY = maskY - scrollPx;
-  if (state.mediaType === 'video') {
-    mediaY = maskY + (maskH - siteH) / 2;
-  }
 
   // If the mask is essentially zero, skip drawing entirely.
   if (maskW < 1 || maskH < 1) return;
@@ -1354,25 +1371,26 @@ function tick(now) {
     if (state.time >= effD) {
       if (state.looping) {
         state.time = 0;
-        if (state.mediaType === 'video' && state.media) {
-          try { state.media.currentTime = 0; } catch (e) {}
-        }
       } else {
         state.time = effD;
         state.playing = false;
         updatePlayButton();
       }
     }
-    if (state.mediaType === 'video' && state.media && state.media.paused) {
-      state.media.play().catch(() => {});
+    // Drive the video by currentTime so it always matches the timeline,
+    // independent of autoplay permissions or drift.
+    if (state.mediaType === 'video' && state.media && state.media.duration) {
+      const videoT = state.time % state.media.duration;
+      // Only assign if the gap is meaningful — assigning every frame causes
+      // visible jitter on some browsers.
+      if (Math.abs(state.media.currentTime - videoT) > 0.05) {
+        try { state.media.currentTime = videoT; } catch (e) {}
+      }
     }
     updateScrub();
     render();
   } else {
     lastFrameTime = 0;
-    if (state.mediaType === 'video' && state.media && !state.media.paused) {
-      state.media.pause();
-    }
   }
   requestAnimationFrame(tick);
 }
@@ -1471,8 +1489,9 @@ bindSlider('duration', 'duration', 'durationVal', null);
 
 document.getElementById('lockBtn').addEventListener('click', (e) => {
   state.sizeLocked = !state.sizeLocked;
-  e.target.classList.toggle('active', state.sizeLocked);
-  e.target.textContent = state.sizeLocked ? 'Locked' : 'Free';
+  const btn = e.currentTarget;
+  btn.classList.toggle('active', state.sizeLocked);
+  btn.title = state.sizeLocked ? 'Locked — width and height move together' : 'Unlocked — adjust independently';
   if (state.sizeLocked) {
     state.sizeY = state.sizeX;
     document.getElementById('sizeY').value = state.sizeX;
@@ -1579,7 +1598,7 @@ async function loadMediaFile(file) {
 
   // Clean up any previous video element
   if (state.media && state.mediaType === 'video') {
-    state.media.pause();
+    try { state.media.pause(); } catch (e) {}
     if (state.media._objectUrl) URL.revokeObjectURL(state.media._objectUrl);
   }
 
@@ -1591,29 +1610,30 @@ async function loadMediaFile(file) {
     return;
   }
 
+  // 50MB size cap. Browsers can technically handle more, but larger files
+  // cause memory pressure during PNG sequence export (each frame is decoded
+  // and held in a ZIP buffer).
+  const MAX_BYTES = 50 * 1024 * 1024;
+  if (file.size > MAX_BYTES) {
+    const sizeMB = (file.size / 1024 / 1024).toFixed(1);
+    setStatus(`File too large: ${sizeMB}MB (max 50MB)`, false);
+    return;
+  }
+
   if (isVideo) {
-    const video = document.createElement('video');
-    video.muted = true;
-    video.loop = true;
-    video.playsInline = true;
-    video.crossOrigin = 'anonymous';
-    const objectUrl = URL.createObjectURL(file);
-    video._objectUrl = objectUrl;
-    video.src = objectUrl;
-
-    await new Promise((resolve, reject) => {
-      video.onloadeddata = resolve;
-      video.onerror = () => reject(new Error('video load failed'));
-    }).catch(err => {
-      setStatus('Video failed to load', false);
-      throw err;
-    });
-
-    video.play().catch(() => {}); // Autoplay may be blocked; not critical for export
-    state.media = video;
-    state.mediaType = 'video';
-    showMediaInfo(`Video · ${file.name}`);
-    setStatus('Ready', false);
+    showMediaInfo(`Loading video · ${file.name} · ${(file.size/1024/1024).toFixed(1)}MB`);
+    try {
+      const video = await loadVideo(file);
+      state.media = video;
+      state.mediaType = 'video';
+      showMediaInfo(`Video · ${file.name} · ${video.videoWidth}×${video.videoHeight}`);
+      setStatus('Ready', false);
+    } catch (err) {
+      setStatus('Video failed: ' + (err.message || 'unknown error'), false);
+      showMediaInfo(`Failed: ${file.name} — see browser console for details`);
+      document.getElementById('fileInput').value = '';
+      return;
+    }
   } else {
     const reader = new FileReader();
     await new Promise(resolve => {
@@ -1635,6 +1655,134 @@ async function loadMediaFile(file) {
   state.time = 0;
   updateScrub();
   render();
+}
+
+// Load a video file into a fully-ready HTMLVideoElement.
+// Tries blob URL first, falls back to data URL if the browser rejects it.
+async function loadVideo(file) {
+  const log = (msg) => console.log('[video load]', msg);
+
+  // Sanity check: what does the browser say it supports?
+  const probeEl = document.createElement('video');
+  const canPlay = {
+    avc1: probeEl.canPlayType('video/mp4; codecs="avc1.42E01E"'),  // baseline
+    main: probeEl.canPlayType('video/mp4; codecs="avc1.4D401F"'),  // main L3.1
+    high: probeEl.canPlayType('video/mp4; codecs="avc1.64001F"'),  // high L3.1
+    plain: probeEl.canPlayType('video/mp4'),
+  };
+  log(`canPlayType: baseline=${canPlay.avc1||'no'} main=${canPlay.main||'no'} high=${canPlay.high||'no'} plain-mp4=${canPlay.plain||'no'}`);
+
+  // Try the blob URL first (faster, no base64 overhead)
+  try {
+    return await loadVideoFromSource(file, 'blob');
+  } catch (err) {
+    log(`blob URL failed: ${err.message}. Trying data URL fallback…`);
+    // If the blob URL was rejected, try data URL — sometimes succeeds where blobs don't
+    return await loadVideoFromSource(file, 'data');
+  }
+}
+
+function loadVideoFromSource(file, mode) {
+  return new Promise(async (resolve, reject) => {
+    const log = (msg) => console.log('[video load]', `(${mode})`, msg);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.loop = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.setAttribute('webkit-playsinline', '');
+
+    let src;
+    if (mode === 'blob') {
+      src = URL.createObjectURL(file);
+      video._objectUrl = src;
+    } else {
+      // Read as data URL (slower for big files but bypasses some blob-handling bugs)
+      log(`reading ${(file.size/1024/1024).toFixed(1)}MB as data URL…`);
+      try {
+        src = await new Promise((res, rej) => {
+          const fr = new FileReader();
+          fr.onload = () => res(fr.result);
+          fr.onerror = () => rej(new Error('FileReader failed'));
+          fr.readAsDataURL(file);
+        });
+        log(`data URL ready, length=${src.length}`);
+      } catch (err) {
+        reject(err);
+        return;
+      }
+    }
+
+    let settled = false;
+
+    const fail = (msg) => {
+      if (settled) return;
+      settled = true;
+      if (mode === 'blob') URL.revokeObjectURL(src);
+      log('FAIL: ' + msg);
+      reject(new Error(msg));
+    };
+    const succeed = (via) => {
+      if (settled) return;
+      settled = true;
+      log(`OK via ${via}, dims=${video.videoWidth}x${video.videoHeight}`);
+      resolve(video);
+    };
+
+    const onError = () => {
+      const err = video.error;
+      const code = err ? err.code : null;
+      const message = err && err.message ? err.message : '';
+      log(`error event: code=${code} message="${message}"`);
+      const messages = {
+        1: 'Aborted',
+        2: 'Network error',
+        3: 'Decode error — codec rejected',
+        4: 'Browser refused this MP4 — possibly an unsupported codec variant',
+      };
+      fail((messages[code] || `Load error (code ${code})`) + (message ? ` · ${message}` : ''));
+    };
+
+    const checkReady = (via) => {
+      if (settled) return;
+      log(`event=${via} readyState=${video.readyState} dims=${video.videoWidth}x${video.videoHeight}`);
+      if (video.videoWidth > 0 && video.readyState >= 2) {
+        succeed(via);
+      } else if (via === 'loadedmetadata' && video.videoWidth > 0) {
+        try { video.currentTime = 0.01; } catch (e) {}
+      }
+    };
+
+    video.addEventListener('loadedmetadata', () => checkReady('loadedmetadata'));
+    video.addEventListener('loadeddata',     () => checkReady('loadeddata'));
+    video.addEventListener('canplay',        () => checkReady('canplay'));
+    video.addEventListener('canplaythrough', () => checkReady('canplaythrough'));
+    video.addEventListener('seeked',         () => checkReady('seeked'));
+    video.addEventListener('error', onError);
+
+    const probeInterval = setInterval(() => {
+      if (settled) { clearInterval(probeInterval); return; }
+      log(`probe readyState=${video.readyState} dims=${video.videoWidth}x${video.videoHeight} networkState=${video.networkState}`);
+      if (video.videoWidth > 0 && video.readyState >= 2) {
+        clearInterval(probeInterval);
+        succeed('probe');
+      }
+    }, 500);
+
+    setTimeout(() => {
+      clearInterval(probeInterval);
+      if (settled) return;
+      if (video.videoWidth > 0) {
+        succeed('timeout-with-dims');
+      } else {
+        fail('Timeout — no metadata after 20s');
+      }
+    }, 20000);
+
+    log(`assigning src (${mode})`);
+    video.src = src;
+    video.load();
+  });
 }
 
 function showMediaInfo(text) {
@@ -1675,35 +1823,6 @@ document.getElementById('projectName').addEventListener('input', (e) => {
 document.getElementById('projectName').addEventListener('blur', () => {
   // Save immediately when the team types a name so it isn't lost on a fast refresh
   if (typeof autoSave === 'function') autoSave();
-});
-
-document.getElementById('saveProjectBtn').addEventListener('click', () => {
-  const project = buildProjectSnapshot();
-  const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = safeProjectName() + '.json';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-  setStatus('Project saved ✓', false);
-});
-
-document.getElementById('loadProjectInput').addEventListener('change', async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  try {
-    const text = await file.text();
-    const project = JSON.parse(text);
-    if (!project.settings) throw new Error('Invalid project file');
-    applyProjectSettings(project);
-    setStatus('Project loaded — reload your source media if needed', false);
-  } catch (err) {
-    setStatus('Could not load project file', false);
-  }
-  document.getElementById('loadProjectInput').value = '';
 });
 
 function applyProjectSettings(project) {
@@ -1749,7 +1868,7 @@ function applyProjectSettings(project) {
     state.sizeLocked = s.sizeLocked;
     const btn = document.getElementById('lockBtn');
     btn.classList.toggle('active', s.sizeLocked);
-    btn.textContent = s.sizeLocked ? 'Locked' : 'Free';
+    btn.title = s.sizeLocked ? 'Locked — width and height move together' : 'Unlocked — adjust independently';
   }
   if (s.swipeDir !== undefined) {
     state.swipeDir = s.swipeDir;
@@ -2021,11 +2140,22 @@ async function exportVideo(format) {
   state.playing = false;
   updatePlayButton();
 
-  if (state.mediaType === 'video') {
-    try {
-      state.media.currentTime = 0;
-      await state.media.play();
-    } catch (err) { /* ignore */ }
+  // Check if we're about to do something that's likely to drop frames.
+  // 4K video sources in WebM/MP4 record real-time and can't keep up.
+  const resChoice = document.getElementById('exportRes').value;
+  if (state.mediaType === 'video' && resChoice === 'uhd') {
+    const ok = confirm(
+      'Exporting UHD video formats with a video source often drops frames ' +
+      'because the browser records in real time at 4K.\n\n' +
+      'For smooth UHD output, use PNG sequence instead.\n\n' +
+      'Continue with ' + format.toUpperCase() + ' export anyway?'
+    );
+    if (!ok) {
+      setExportButtonsDisabled(false);
+      state.playing = wasPlaying;
+      updatePlayButton();
+      return;
+    }
   }
 
   let mimeType, ext;
@@ -2068,6 +2198,17 @@ async function exportVideo(format) {
   setStatus(`Exporting ${ext.toUpperCase()}…`, true);
 
   state.time = 0;
+  // Seek video to 0 and let it play in parallel — but also nudge it via
+  // currentTime each frame so it stays in sync with the timeline even if
+  // autoplay was blocked or playback drifts.
+  if (state.mediaType === 'video' && state.media) {
+    try {
+      state.media.currentTime = 0;
+      // Don't await — let it start in the background. The currentTime
+      // nudges in tickExport keep it on track regardless.
+      state.media.play().catch(() => {});
+    } catch (err) { /* ignore */ }
+  }
   renderToContext(offCtx, W, H, renderOpts);
   recorder.start();
 
@@ -2079,6 +2220,14 @@ async function exportVideo(format) {
   const tickExport = () => {
     const elapsed = (performance.now() - startReal) / 1000;
     state.time = Math.min(elapsed, effD);
+    // Keep the source video synced to the timeline. If play() worked, this
+    // is mostly a no-op; if not, it drives the video frame-by-frame.
+    if (state.mediaType === 'video' && state.media && state.media.duration) {
+      const videoT = Math.min(state.time, state.media.duration - 0.001);
+      if (Math.abs(state.media.currentTime - videoT) > 0.08) {
+        try { state.media.currentTime = videoT; } catch (e) {}
+      }
+    }
     updateScrub();
     renderToContext(offCtx, W, H, renderOpts);
     render();
