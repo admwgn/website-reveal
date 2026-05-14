@@ -897,7 +897,7 @@
           <select id="exportRes">
             <!-- Options are populated dynamically based on the current ratio -->
           </select>
-          <p class="field-help" style="margin-top: 8px; margin-bottom: 0;">Resolution updates with the selected aspect ratio.</p>
+          <p class="field-help" style="margin-top: 8px; margin-bottom: 0;" id="resolutionNote">Resolution applies to WebM and MP4. PNG sequence uses source video resolution.</p>
         </div>
 
         <div class="field">
@@ -918,7 +918,7 @@
           </div>
         </div>
 
-        <div class="export-note">
+        <div class="export-note" id="exportNote">
           <strong style="color: var(--text);">PNG sequence</strong> includes alpha when background is transparent — imports into Premiere, After Effects, and Resolve. <strong style="color: var(--text);">WebM</strong> and <strong style="color: var(--text);">MP4</strong> flatten to the chosen background color.
         </div>
       </div>
@@ -1627,6 +1627,11 @@ async function loadMediaFile(file) {
       state.media = video;
       state.mediaType = 'video';
       showMediaInfo(`Video · ${file.name} · ${video.videoWidth}×${video.videoHeight}`);
+      // Default WebM/MP4 export to HD when a video is loaded — UHD video export
+      // is technically possible but real-time recording chokes at 4K.
+      // (PNG sequence will still use the video's source resolution automatically.)
+      document.getElementById('exportRes').value = 'hd';
+      updateExportNote();
       setStatus('Ready', false);
     } catch (err) {
       setStatus('Video failed: ' + (err.message || 'unknown error'), false);
@@ -1802,8 +1807,12 @@ document.getElementById('clearMediaBtn').addEventListener('click', () => {
   state.time = 0;
   updateScrub();
   render();
+  updateExportNote();
   setStatus('Ready', false);
 });
+
+// Update the export note whenever the resolution dropdown changes
+document.getElementById('exportRes').addEventListener('change', updateExportNote);
 
 function showCaptureOverlay(show) {
   document.getElementById('captureOverlay').classList.toggle('active', show);
@@ -1914,11 +1923,44 @@ const RES_TIERS = {
   '4:5':  { hd: { w: 1080, h: 1350 }, uhd: { w: 2160, h: 2700 } },
 };
 
-function getExportDimensions() {
+// Returns dimensions for the export.
+// For PNG with a video source, uses the source video's native size by default
+// (passing forSourceRes=true uses video dimensions; otherwise the dropdown wins).
+function getExportDimensions(format) {
+  // PNG with a video source: use source video dimensions for maximum fidelity.
+  // This preserves the video's native resolution even if the dropdown says HD.
+  if (format === 'png' && state.mediaType === 'video' && state.media) {
+    const vw = state.media.videoWidth;
+    const vh = state.media.videoHeight;
+    if (vw > 0 && vh > 0) {
+      // Match canvas aspect — fit source size to current aspect ratio.
+      // We anchor to the larger side and clamp.
+      const canvasAR = canvas.width / canvas.height;
+      const srcAR = vw / vh;
+      let w, h;
+      if (Math.abs(canvasAR - srcAR) < 0.01) {
+        // Aspect ratios match — use source size directly
+        w = vw; h = vh;
+      } else {
+        // Aspect ratios differ. Scale to match canvas AR using video's longest edge.
+        const longEdge = Math.max(vw, vh);
+        if (canvasAR >= 1) {
+          w = longEdge;
+          h = Math.round(longEdge / canvasAR);
+        } else {
+          h = longEdge;
+          w = Math.round(longEdge * canvasAR);
+        }
+      }
+      // Ensure even numbers (some codecs require this; PNG doesn't but doesn't hurt)
+      w = w - (w % 2);
+      h = h - (h % 2);
+      return { w, h };
+    }
+  }
   const resChoice = document.getElementById('exportRes').value;
   const tier = RES_TIERS[state.ratio];
   if (tier && tier[resChoice]) return tier[resChoice];
-  // Fallback for 'preview' or unknown values
   return { w: canvas.width, h: canvas.height };
 }
 
@@ -1948,6 +1990,26 @@ function rebuildResolutionDropdown(preferredTier) {
   // Try to keep the previous tier; if not available, default to uhd
   select.value = current;
   if (select.selectedIndex === -1) select.value = 'uhd';
+  updateExportNote();
+}
+
+// Update the export note + resolution help based on what's loaded.
+// Tells the team exactly what each button will produce.
+function updateExportNote() {
+  const note = document.getElementById('exportNote');
+  const resNote = document.getElementById('resolutionNote');
+  if (!note || !resNote) return;
+
+  if (state.mediaType === 'video' && state.media && state.media.videoWidth) {
+    const vw = state.media.videoWidth;
+    const vh = state.media.videoHeight;
+    const pngDims = getExportDimensions('png');
+    resNote.innerHTML = `Resolution applies to WebM &amp; MP4. PNG sequence will export at <strong style="color: var(--text);">${pngDims.w}×${pngDims.h}</strong> (source size).`;
+    note.innerHTML = `<strong style="color: var(--text);">PNG sequence</strong> exports at the video's source resolution (${vw}×${vh}) with alpha when background is transparent — best for Adobe handoff. <strong style="color: var(--text);">WebM</strong> and <strong style="color: var(--text);">MP4</strong> use the resolution above and flatten to the background color.`;
+  } else {
+    resNote.textContent = 'Resolution applies to all export formats.';
+    note.innerHTML = `<strong style="color: var(--text);">PNG sequence</strong> includes alpha when background is transparent — imports into Premiere, After Effects, and Resolve. <strong style="color: var(--text);">WebM</strong> and <strong style="color: var(--text);">MP4</strong> flatten to the chosen background color.`;
+  }
 }
 
 // Sanitize project name: keep letters, numbers, dashes; replace anything else with -
@@ -2008,8 +2070,13 @@ async function exportPngSequence() {
   state.playing = false;
   updatePlayButton();
 
-  const { w: W, h: H } = getExportDimensions();
-  const resTag = (W === 3840) ? '4k' : (W === 1920 ? 'hd' : `${W}x${H}`);
+  const { w: W, h: H } = getExportDimensions('png');
+  // Tag based on actual dimensions
+  let resTag;
+  if (W === 3840) resTag = '4k';
+  else if (W === 1920) resTag = 'hd';
+  else if (state.mediaType === 'video' && state.media && W === state.media.videoWidth) resTag = 'source';
+  else resTag = `${W}x${H}`;
 
   try {
     const zipBlob = await renderPngSequenceZip({ W, H, ratio: state.ratio, progressOffset: 0, progressScale: 1 });
@@ -2139,24 +2206,6 @@ async function exportVideo(format) {
   const wasPlaying = state.playing;
   state.playing = false;
   updatePlayButton();
-
-  // Check if we're about to do something that's likely to drop frames.
-  // 4K video sources in WebM/MP4 record real-time and can't keep up.
-  const resChoice = document.getElementById('exportRes').value;
-  if (state.mediaType === 'video' && resChoice === 'uhd') {
-    const ok = confirm(
-      'Exporting UHD video formats with a video source often drops frames ' +
-      'because the browser records in real time at 4K.\n\n' +
-      'For smooth UHD output, use PNG sequence instead.\n\n' +
-      'Continue with ' + format.toUpperCase() + ' export anyway?'
-    );
-    if (!ok) {
-      setExportButtonsDisabled(false);
-      state.playing = wasPlaying;
-      updatePlayButton();
-      return;
-    }
-  }
 
   let mimeType, ext;
   if (format === 'webm') {
